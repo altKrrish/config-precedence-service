@@ -1,14 +1,14 @@
 import os
 from pathlib import Path
 
-from dotenv import load_dotenv
+import yaml
+from dotenv import dotenv_values
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
-import yaml
 
 app = FastAPI()
 
-# Allow CORS
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,8 +17,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-load_dotenv()
-
+# Default configuration
 DEFAULTS = {
     "port": 8000,
     "workers": 1,
@@ -29,7 +28,12 @@ DEFAULTS = {
 
 
 def to_bool(value):
-    return str(value).strip().lower() in ("true", "1", "yes", "on")
+    return str(value).strip().lower() in (
+        "true",
+        "1",
+        "yes",
+        "on",
+    )
 
 
 def coerce(key, value):
@@ -43,15 +47,19 @@ def coerce(key, value):
 def load_config():
     config = DEFAULTS.copy()
 
-    # YAML layer
+    # 1. YAML layer
     env = os.getenv("APP_ENV", "development")
     yaml_file = Path(f"config.{env}.yaml")
     if yaml_file.exists():
-        with open(yaml_file) as f:
-            config.update(yaml.safe_load(f) or {})
+        with open(yaml_file, "r") as f:
+            yaml_data = yaml.safe_load(f) or {}
+            for k, v in yaml_data.items():
+                config[k] = coerce(k, v)
 
-    # .env / OS env layer
-    mapping = {
+    # 2. .env layer
+    dotenv = dotenv_values(".env")
+
+    env_mapping = {
         "APP_PORT": "port",
         "NUM_WORKERS": "workers",
         "APP_WORKERS": "workers",
@@ -60,25 +68,38 @@ def load_config():
         "APP_API_KEY": "api_key",
     }
 
-    for env_key, cfg_key in mapping.items():
+    for env_key, cfg_key in env_mapping.items():
+        if env_key in dotenv and dotenv[env_key] is not None:
+            config[cfg_key] = coerce(cfg_key, dotenv[env_key])
+
+    # 3. OS environment layer (highest before CLI)
+    for env_key, cfg_key in env_mapping.items():
         if env_key in os.environ:
             config[cfg_key] = coerce(cfg_key, os.environ[env_key])
 
     return config
 
 
+@app.get("/")
+def root():
+    return {"status": "ok"}
+
+
 @app.get("/effective-config")
 def effective_config(set: list[str] = Query(default=[])):
     config = load_config()
 
-    # CLI overrides
+    # 4. CLI/query overrides (highest precedence)
     for item in set:
         if "=" not in item:
             continue
+
         key, value = item.split("=", 1)
+
         if key in config:
             config[key] = coerce(key, value)
 
+    # Always mask the secret
     config["api_key"] = "****"
 
     return config
